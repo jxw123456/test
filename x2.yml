@@ -1,0 +1,108 @@
+build:
+ stage: build
+ variables: 
+    branch: master
+ before_script:
+   - chcp 65001
+ script:
+   - $FILES=git diff-tree --no-commit-id --name-only -r $CI_COMMIT_SHA 
+   - echo $FILES >> .env
+   - $CI_COMMIT_AUTHORNAME=$(git log --format="%an" -n 1 "${CI_COMMIT_SHA}")
+   - echo CI_COMMIT_BRANCH=${CI_COMMIT_BRANCH}
+   - echo CI_PIPELINE_SOURCE=$CI_PIPELINE_SOURCE
+   - echo CI_MERGE_REQUEST_TARGET_BRANCH_NAME=$CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+   - echo CI_COMMIT_MESSAGE=$CI_COMMIT_MESSAGE
+   - echo CI_COMMIT_TITLE=$CI_COMMIT_TITLE
+   - echo CI_COMMIT_AUTHORNAME=$CI_COMMIT_AUTHORNAME
+   - if($CI_MERGE_REQUEST_TARGET_BRANCH_NAME -eq "master"){
+            echo "building before merge to master"
+            }
+     elseif($FILES) {
+       echo "changed files are $FILES"
+     }
+     else {
+            echo 'no need to build';
+            $headers = @{Authorization="Bearer $api_token"};
+            Invoke-WebRequest -Header $headers -Method POST  "https://gitlab.chehejia.com/api/v4/projects/$CI_PROJECT_ID/pipelines/$CI_PIPELINE_ID/cancel";
+            exit 0
+         }
+         
+   # AutoGenDataConfigfile
+   #- echo 'Generate the BMSDataConfig source file from the Parameter Table...'
+   #- cd $DataConfigPath 
+   #- python .\AutoGenDataConfigfile.py
+
+   # Compiling
+   - cd $BuildPath_Root
+   - echo "Building on BSW Branch $branch"
+   - git config --global --add safe.directory *
+   - git config --global core.quotepath false
+   - git reset --hard
+   - git clean -fd
+   - git checkout master --quiet
+   - git pull --quiet
+   - git checkout $branch --quiet
+   - git pull --quiet
+
+   - cd $CI_PROJECT_DIR
+   - python .\build_setup.py --source-folder $SOURCE_FOLDER --target-folder $TARGET_FOLDER
+
+   - cd $BuildPath
+   - python .\build.py
+   - .\m clean
+   - .\m -j20
+   - .\Hex2S19.bat
+   # GenA2L
+   - python .\GenA2L.py
+
+ rules:
+   - when: manual
+  #  - if: $CI_PIPELINE_SOURCE == 'merge_request_event' && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME != "master"
+  #    when: never
+  #  - if: $CI_COMMIT_BRANCH == 'master'
+  #    when: never
+  #  - if: $FILES == ""
+  #    when: never
+  #  - if: $CI_PIPELINE_SOURCE == 'push' && $CI_COMMIT_MESSAGE =~ /Merge branch/
+  #    when: never
+   - changes:
+        - .gitlab-ci.yml
+        - 04_Coding/ASW/Code/**/*
+        - 04_Coding/ASW/Model/DataConfig/*
+        - build_setup.py
+
+ tags:
+    - bms_build_runner_cloud_out
+
+write_to_another_repo:
+  stage: .post
+  before_script:
+    - chcp 65001
+    - git config --global user.name "Gitlab Runner"
+    - git config --global --add safe.directory $BuildPath_Root
+    - git config --global core.quotepath false
+    - $CI_COMMIT_AUTHORNAME=$(git log --format="%an" -n 1 "${CI_COMMIT_SHA}")
+    - $CI_COMMITER_EMAIL=$(git log -1 $CI_COMMIT_SHA --pretty="%cE")
+  script:
+    - cd $BuildPath
+    - if(Test-path BMS_App.7z) {Remove-Item BMS_App.7z}
+    - py7zr c BMS_App.7z BMS_App.elf BMS_App.map BMS_App.hex BMS_App.a2l BMS_Appl.s19
+     
+    - cd $BuildPath_Root
+    - if(Test-path hex/BMS_App.7z) {Remove-Item hex/BMS_App.7z}
+    - Move-Item -Path $BuildPath/BMS_App.7z -Destination hex/BMS_App.7z
+
+    - $CURRENTDATE="$(date)"
+    - echo "$CURRENTDATE $CI_COMMIT_TITLE by $CI_COMMIT_AUTHORNAME on branch $CI_COMMIT_BRANCH" | tee -a commitlog.log
+    #- git pull
+    #- git status
+    - git add --all
+    - git commit -m "$CI_COMMIT_TITLE"
+    - git push -o ci-skip https://gitlab-ci-token:$RunnerToken@$CI_SERVER_HOST/$GitPath_BSW
+    - $CI_COMMIT_SHA_BSW=$(git log -1 --format="%H")
+    - python sending_feishu.py $CI_COMMITER_EMAIL $CI_COMMIT_MESSAGE $CI_COMMIT_SHA $GitUrl_ASW $CI_COMMIT_SHA_BSW $GitUrl_BSW
+
+  dependencies:
+    - build
+  tags:
+    - bms_build_runner_cloud_out
